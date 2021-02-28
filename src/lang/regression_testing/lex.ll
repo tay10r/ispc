@@ -32,33 +32,31 @@
 */
 
 %{
+#include "lexer_impl_flex.h"
 
-#include "ispc.h"
-#include "sym.h"
-#include "util.h"
-#include "module.h"
-#include "type.h"
-#include "parse.hh"
+#include <map>
+#include <string>
+
 #include <stdlib.h>
 #include <stdint.h>
 
-static uint64_t lParseBinary(const char *ptr, SourcePos pos, char **endPtr);
-static int lParseInteger(bool dotdotdot);
-static void lCComment(SourcePos *);
-static void lCppComment(SourcePos *);
+static uint64_t lParseBinary(FlexLexerData *lexerData, const char *ptr, SourcePos pos, char **endPtr);
+static int lParseInteger(FlexLexerData *lexerData, const char *tokenText, bool dotdotdot);
+static void lCComment(FlexLexerData* lexerData, yyscan_t scanner);
+static void lCppComment(yyscan_t scanner, SourcePos *);
 static void lNextValidChar(SourcePos *, char const*&);
-static void lPragmaIgnoreWarning(SourcePos *, std::string);
-static void lPragmaUnroll(YYSTYPE *, SourcePos *, std::string, bool);
-static bool lConsumePragma(YYSTYPE *, SourcePos *);
-static void lHandleCppHash(SourcePos *);
-static void lStringConst(YYSTYPE *, SourcePos *);
+static void lPragmaIgnoreWarning(FlexLexerData *, std::string);
+static void lPragmaUnroll(FlexLexerData* lexerData, std::string, bool);
+static bool lConsumePragma(FlexLexerData *, yyscan_t);
+static void lHandleCppHash(FlexLexerData* lexerData, char *tokenText);
+static void lStringConst(FlexLexerData* lexerData, YYSTYPE *, SourcePos *, char *tokenText);
 static double lParseHexFloat(const char *ptr);
 extern void RegisterDependency(const std::string &fileName);
 
 #define YY_USER_ACTION \
-    yylloc.first_line = yylloc.last_line; \
-    yylloc.first_column = yylloc.last_column; \
-    yylloc.last_column += yyleng;
+    yyextra->yylloc.first_line = yyextra->yylloc.last_line; \
+    yyextra->yylloc.first_column = yyextra->yylloc.last_column; \
+    yyextra->yylloc.last_column += yyleng;
 
 #ifdef ISPC_HOST_IS_WINDOWS
 inline int isatty(int) { return 0; }
@@ -97,6 +95,14 @@ static int allTokens[] = {
 
 std::map<int, std::string> tokenToName;
 std::map<std::string, std::string> tokenNameRemap;
+
+const char *TokenToName(int kind) {
+  auto it = tokenToName.find(kind);
+  if (it == tokenToName.end())
+    return "<unknown-token>";
+  else
+    return it->second.c_str();
+}
 
 void ParserInit() {
     tokenToName[TOKEN_ASSERT] = "assert";
@@ -326,36 +332,15 @@ inline int ispcRand() {
 #endif
 }
 
-#define RT \
-    if (g->enableFuzzTest) { \
-        int r = ispcRand() % 40; \
-        if (r == 0) { \
-            Warning(yylloc, "Fuzz test dropping token"); \
-        } \
-        else if (r == 1) { \
-            Assert (tokenToName.size() > 0); \
-            int nt = sizeof(allTokens) / sizeof(allTokens[0]); \
-            int tn = ispcRand() % nt; \
-            yylval.stringVal = new std::string(yytext); /* just in case */\
-            Warning(yylloc, "Fuzz test replaced token with \"%s\"", tokenToName[allTokens[tn]].c_str()); \
-            return allTokens[tn]; \
-        } \
-        else if (r == 2) { \
-            Symbol *sym = m->symbolTable->RandomSymbol(); \
-            if (sym != NULL) { \
-                yylval.stringVal = new std::string(sym->name); \
-                Warning(yylloc, "Fuzz test replaced with identifier \"%s\".", sym->name.c_str()); \
-                return TOKEN_IDENTIFIER; \
-            } \
-        } \
-        /*  TOKEN_TYPE_NAME */ \
-     } else /* swallow semicolon */
+#define RT
 
 %}
 
 %option nounput
 %option noyywrap
 %option nounistd
+%option reentrant
+%option extra-type="FlexLexerData*"
 
 WHITESPACE [ \t\r]+
 INT_NUMBER (([0-9]+)|(0x[0-9a-fA-F]+)|(0b[01]+))[uUlL]*[kMG]?[uUlL]*
@@ -370,10 +355,10 @@ IDENT [a-zA-Z_][a-zA-Z_0-9]*
 ZO_SWIZZLE ([01]+[w-z]+)+|([01]+[rgba]+)+|([01]+[uv]+)+
 
 %%
-"/*"            { lCComment(&yylloc); }
-"//"            { lCppComment(&yylloc); }
+"/*"            { lCComment(yyextra, yyscanner); }
+"//"            { lCppComment(yyscanner, &yyextra->yylloc); }
 "#pragma" {
-    if (lConsumePragma(&yylval, &yylloc)) {
+    if (lConsumePragma(yyextra, yyscanner)) {
         return TOKEN_PRAGMA;
     }
 }
@@ -383,15 +368,15 @@ __assert { RT; return TOKEN_ASSERT; }
 bool { RT; return TOKEN_BOOL; }
 break { RT; return TOKEN_BREAK; }
 case { RT; return TOKEN_CASE; }
-cbreak { RT; Warning(yylloc, "\"cbreak\" is deprecated. Use \"break\"."); return TOKEN_BREAK; }
-ccontinue { RT; Warning(yylloc, "\"ccontinue\" is deprecated. Use \"continue\"."); return TOKEN_CONTINUE; }
+cbreak { RT; Warning(yyextra, "\"cbreak\" is deprecated. Use \"break\"."); return TOKEN_BREAK; }
+ccontinue { RT; Warning(yyextra, "\"ccontinue\" is deprecated. Use \"continue\"."); return TOKEN_CONTINUE; }
 cdo { RT; return TOKEN_CDO; }
 cfor { RT; return TOKEN_CFOR; }
 cif { RT; return TOKEN_CIF; }
 cwhile { RT; return TOKEN_CWHILE; }
 const { RT; return TOKEN_CONST; }
 continue { RT; return TOKEN_CONTINUE; }
-creturn { RT; Warning(yylloc, "\"creturn\" is deprecated. Use \"return\"."); return TOKEN_RETURN; }
+creturn { RT; Warning(yyextra, "\"creturn\" is deprecated. Use \"return\"."); return TOKEN_RETURN; }
 __declspec { RT; return TOKEN_DECLSPEC; }
 default { RT; return TOKEN_DEFAULT; }
 do { RT; return TOKEN_DO; }
@@ -457,14 +442,14 @@ while { RT; return TOKEN_WHILE; }
 "operator/" { return TOKEN_IDENTIFIER; }
 "operator%" { return TOKEN_IDENTIFIER; }
 
-L?\"(\\.|[^\\"])*\" { lStringConst(&yylval, &yylloc); return TOKEN_STRING_LITERAL; }
+L?\"(\\.|[^\\"])*\" { lStringConst(yyextra, &yyextra->yylval, &yyextra->yylloc, yytext); return TOKEN_STRING_LITERAL; }
 
 {IDENT} {
     RT;
     /* We have an identifier--is it a type name or an identifier?
        The symbol table will straighten us out... */
-    yylval.stringVal = new std::string(yytext);
-    if (m->symbolTable->LookupType(yytext) != NULL)
+    yyextra->yylval.stringVal = new std::string(yytext);
+    if (yyextra->symbolTable->IsType(yytext))
         return TOKEN_TYPE_NAME;
     else
         return TOKEN_IDENTIFIER;
@@ -472,12 +457,12 @@ L?\"(\\.|[^\\"])*\" { lStringConst(&yylval, &yylloc); return TOKEN_STRING_LITERA
 
 {INT_NUMBER} {
     RT;
-    return lParseInteger(false);
+    return lParseInteger(yyextra, yytext, false);
 }
 
 {INT_NUMBER_DOTDOTDOT} {
     RT;
-    return lParseInteger(true);
+    return lParseInteger(yyextra, yytext, true);
 }
 
 {FORTRAN_DOUBLE_NUMBER} {
@@ -487,20 +472,20 @@ L?\"(\\.|[^\\"])*\" { lStringConst(&yylval, &yylloc); return TOKEN_STRING_LITERA
       while (yytext[i] != 'd' && yytext[i] != 'D') i++;
       yytext[i] = 'E';
     }
-    yylval.doubleVal = atof(yytext);
+    yyextra->yylval.doubleVal = atof(yytext);
     return TOKEN_DOUBLE_CONSTANT;
 }
 
 
 {FLOAT_NUMBER} {
     RT;
-    yylval.floatVal = (float)atof(yytext);
+    yyextra->yylval.floatVal = (float)atof(yytext);
     return TOKEN_FLOAT_CONSTANT;
 }
 
 {HEX_FLOAT_NUMBER} {
     RT;
-    yylval.floatVal = (float)lParseHexFloat(yytext);
+    yyextra->yylval.floatVal = (float)lParseHexFloat(yytext);
     return TOKEN_FLOAT_CONSTANT;
 }
 
@@ -555,16 +540,16 @@ L?\"(\\.|[^\\"])*\" { lStringConst(&yylval, &yylloc); return TOKEN_STRING_LITERA
 {WHITESPACE} { }
 
 \n {
-    yylloc.last_line++;
-    yylloc.last_column = 1;
+    yyextra->yylloc.last_line++;
+    yyextra->yylloc.last_column = 1;
 }
 
 #(line)?[ ][0-9]+[ ]\"(\\.|[^\\"])*\"[^\n]* {
-    lHandleCppHash(&yylloc);
+    lHandleCppHash(yyextra, yytext);
 }
 
 . {
-    Error(yylloc, "Illegal character: %c (0x%x)", yytext[0], int(yytext[0]));
+    Error(yyextra, "Illegal character: %c (0x%x)", yytext[0], int(yytext[0]));
     YY_USER_ACTION
 }
 
@@ -581,14 +566,14 @@ L?\"(\\.|[^\\"])*\" { lStringConst(&yylval, &yylloc); return TOKEN_STRING_LITERA
 /** Return the integer version of a binary constant from a string.
  */
 static uint64_t
-lParseBinary(const char *ptr, SourcePos pos, char **endPtr) {
+lParseBinary(FlexLexerData *lexerData, const char *ptr, SourcePos pos, char **endPtr) {
     uint64_t val = 0;
     bool warned = false;
 
     while (*ptr == '0' || *ptr == '1') {
         if ((val & (((int64_t)1)<<63)) && warned == false) {
             // We're about to shift out a set bit
-            Warning(pos, "Can't represent binary constant with a 64-bit integer type");
+            Warning(lexerData, "Can't represent binary constant with a 64-bit integer type");
             warned = true;
         }
 
@@ -601,19 +586,22 @@ lParseBinary(const char *ptr, SourcePos pos, char **endPtr) {
 
 
 static int
-lParseInteger(bool dotdotdot) {
+lParseInteger(FlexLexerData *lexerData, const char *tokenText, bool dotdotdot) {
+
+    auto &yylval = lexerData->yylval;
+
     int ls = 0, us = 0;
 
     char *endPtr = NULL;
-    if (yytext[0] == '0' && yytext[1] == 'b')
-        yylval.intVal = lParseBinary(yytext+2, yylloc, &endPtr);
+    if (tokenText[0] == '0' && tokenText[1] == 'b')
+        yylval.intVal = lParseBinary(lexerData, tokenText+2, lexerData->yylloc, &endPtr);
     else {
 #if defined(ISPC_HOST_IS_WINDOWS) && !defined(__MINGW32__)
-        yylval.intVal = _strtoui64(yytext, &endPtr, 0);
+        yylval.intVal = _strtoui64(tokenText, &endPtr, 0);
 #else
         // FIXME: should use strtouq and then issue an error if we can't
         // fit into 64 bits...
-        yylval.intVal = strtoull(yytext, &endPtr, 0);
+        yylval.intVal = strtoull(tokenText, &endPtr, 0);
 #endif
     }
 
@@ -667,14 +655,14 @@ lParseInteger(bool dotdotdot) {
             // No u or l suffix
             // If we're compiling to an 8-bit mask target and the constant
             // fits into 8 bits, return an 8-bit int.
-            if (g->target->getDataTypeWidth() == 8) {
+            if (lexerData->dataTypeWidth == 8) {
                 if (yylval.intVal <= 0x7fULL)
                     return TOKEN_INT8_CONSTANT;
                 else if (yylval.intVal <= 0xffULL)
                     return TOKEN_UINT8_CONSTANT;
             }
             // And similarly for 16-bit masks and constants
-            if (g->target->getDataTypeWidth() == 16) {
+            if (lexerData->dataTypeWidth == 16) {
                 if (yylval.intVal <= 0x7fffULL)
                     return TOKEN_INT16_CONSTANT;
                 else if (yylval.intVal <= 0xffffULL)
@@ -697,10 +685,12 @@ lParseInteger(bool dotdotdot) {
 /** Handle a C-style comment in the source.
  */
 static void
-lCComment(SourcePos *pos) {
+lCComment(FlexLexerData* lexerData, yyscan_t scanner) {
     char c, prev = 0;
 
-    while ((c = yyinput()) != 0) {
+    auto pos = &lexerData->yylloc;
+
+    while ((c = yyinput(scanner)) != 0) {
         ++pos->last_column;
 
         if (c == '\n') {
@@ -711,7 +701,7 @@ lCComment(SourcePos *pos) {
             return;
         prev = c;
     }
-    Error(*pos, "unterminated comment");
+    Error(lexerData, "unterminated comment");
 }
 
 static void lNextValidChar(SourcePos *pos, char const*&currChar) {
@@ -723,7 +713,11 @@ static void lNextValidChar(SourcePos *pos, char const*&currChar) {
 
 /** Handle pragma directive to unroll loops.
 */
-static void lPragmaUnroll(YYSTYPE *yylval, SourcePos *pos, std::string fromUserReq, bool isNounroll) {
+static void lPragmaUnroll(FlexLexerData* lexerData, std::string fromUserReq, bool isNounroll) {
+
+    YYSTYPE *yylval = &lexerData->yylval;
+
+    SourcePos *pos = &lexerData->yylloc;
 
     const char *currChar = fromUserReq.data();
     yylval->pragmaAttributes = new PragmaAttributes();
@@ -734,20 +728,20 @@ static void lPragmaUnroll(YYSTYPE *yylval, SourcePos *pos, std::string fromUserR
 
     if (isNounroll) {
         if (*currChar == '\n') {
-            yylval->pragmaAttributes->unrollType = Globals::pragmaUnrollType::nounroll;
+            yylval->pragmaAttributes->unrollType = PragmaUnrollType::nounroll;
             pos->last_column = 1;
             pos->last_line++;
             return;
         }
         pos->last_column = 1;
         pos->last_line++;
-        Warning(*pos, "extra tokens at end of '#pragma nounroll'.");
+        Warning(lexerData, "extra tokens at end of '#pragma nounroll'.");
         return;
 
     }
 
     if (*currChar == '\n') {
-        yylval->pragmaAttributes->unrollType = Globals::pragmaUnrollType::unroll;
+        yylval->pragmaAttributes->unrollType = PragmaUnrollType::unroll;
         pos->last_column = 1;
         pos->last_line++;
         return;
@@ -770,7 +764,7 @@ static void lPragmaUnroll(YYSTYPE *yylval, SourcePos *pos, std::string fromUserR
 #endif
 
     if((count == 0) && (endPtr != currChar)){
-        Error(*pos, "'#pragma unroll()' invalid value '0'; must be positive.");
+        Error(lexerData, "'#pragma unroll()' invalid value '0'; must be positive.");
     }
 
     lNextValidChar(pos, const_cast<const char*&>(endPtr));
@@ -782,11 +776,11 @@ static void lPragmaUnroll(YYSTYPE *yylval, SourcePos *pos, std::string fromUserR
             lNextValidChar(pos, const_cast<const char*&>(endPtr));
         }
         else {
-            Error(*pos, "Incomplete '#pragma unroll()' : expected ')'.");
+            Error(lexerData, "Incomplete '#pragma unroll()' : expected ')'.");
         }
     }
 
-    yylval->pragmaAttributes->unrollType = Globals::pragmaUnrollType::count;
+    yylval->pragmaAttributes->unrollType = PragmaUnrollType::count;
     yylval->pragmaAttributes->count = count;
     pos->last_line++;
     pos->last_column = 1;
@@ -795,7 +789,10 @@ static void lPragmaUnroll(YYSTYPE *yylval, SourcePos *pos, std::string fromUserR
 /** Handle pragma directive to ignore warning.
 */
 static void
-lPragmaIgnoreWarning(SourcePos *pos, std::string fromUserReq) {
+lPragmaIgnoreWarning(FlexLexerData *lexerData, std::string fromUserReq) {
+
+    SourcePos *pos = &lexerData->yylloc;
+
     std::string userReq;
     const char *currChar = fromUserReq.data();
     bool perfWarningOnly = false;
@@ -805,7 +802,7 @@ lPragmaIgnoreWarning(SourcePos *pos, std::string fromUserReq) {
         pos->last_column = 1;
         pos->last_line++;
         std::pair<int, std::string> key = std::pair<int, std::string>(pos->last_line, pos->name);
-        g->turnOffWarnings[key] = perfWarningOnly;
+        lexerData->turnOffWarnings[key] = perfWarningOnly;
         return;
     }
     else if (*currChar == '(') {
@@ -828,37 +825,41 @@ lPragmaIgnoreWarning(SourcePos *pos, std::string fromUserReq) {
                     if (userReq.compare("perf") == 0) {
                         perfWarningOnly = true;
                         std::pair<int, std::string> key = std::pair<int, std::string>(pos->last_line, pos->name);
-                        g->turnOffWarnings[key] = perfWarningOnly;
+                        lexerData->turnOffWarnings[key] = perfWarningOnly;
                     }
                     else if (userReq.compare("all") == 0) {
                         std::pair<int, std::string> key = std::pair<int, std::string>(pos->last_line, pos->name);
-                        g->turnOffWarnings[key] = perfWarningOnly;
+                        lexerData->turnOffWarnings[key] = perfWarningOnly;
                     }
                     else {
-                        Error(*pos, "Incorrect argument for '#pragma ignore warning()'.");
+                        Error(lexerData, "Incorrect argument for '#pragma ignore warning()'.");
                     }
                     return;
                 }
             }
         }
         else if (*currChar == '\n') {
-            Error(*pos, "Incomplete '#pragma ignore warning()' : expected ')'.");
+            Error(lexerData, "Incomplete '#pragma ignore warning()' : expected ')'.");
             pos->last_column = 1;
             pos->last_line++;
             return;
         }
     }
-    Error(*pos, "Undefined #pragma.");
+    Error(lexerData, "Undefined #pragma.");
 }
 
 /** Consume line starting with '#pragma' and decide on next action based on
  * directive.
  */
-static bool lConsumePragma(YYSTYPE *yylval, SourcePos *pos) {
+static bool lConsumePragma(FlexLexerData *lexerData, yyscan_t scanner) {
+
+    SourcePos *pos = &lexerData->yylloc;
+
+
     char c;
     std::string userReq;
     do {
-        c = yyinput();
+        c = yyinput(scanner);
         ++pos->last_column;
     } while ((c == ' ') || (c == '\t') || (c == '\r'));
     if (c == '\n') {
@@ -870,38 +871,38 @@ static bool lConsumePragma(YYSTYPE *yylval, SourcePos *pos) {
 
     while (c != '\n') {
         userReq += c;
-        c = yyinput();
+        c = yyinput(scanner);
     }
     userReq += c;
     std::string loopUnroll("unroll"), loopNounroll("nounroll"), ignoreWarning("ignore warning");
     if (loopUnroll == userReq.substr(0, loopUnroll.size())) {
         pos->last_column += loopUnroll.size();
-        lPragmaUnroll(yylval, pos, userReq.erase(0, loopUnroll.size()), false);
+        lPragmaUnroll(lexerData, userReq.erase(0, loopUnroll.size()), false);
         return true;
     }
     else if (loopNounroll == userReq.substr(0, loopNounroll.size())) {
         pos->last_column += loopNounroll.size();
-        lPragmaUnroll(yylval, pos, userReq.erase(0, loopNounroll.size()), true);
+        lPragmaUnroll(lexerData, userReq.erase(0, loopNounroll.size()), true);
         return true;
     }
     else if (ignoreWarning == userReq.substr(0, ignoreWarning.size())) {
         pos->last_column += ignoreWarning.size();
-        lPragmaIgnoreWarning(pos, userReq.erase(0, ignoreWarning.size()));
+        lPragmaIgnoreWarning(lexerData, userReq.erase(0, ignoreWarning.size()));
         return false;
     }
 
     // Ignore pragma : invalid directive provided.
-    Warning(*pos, "unknown pragma ignored.");
+    Warning(lexerData, "unknown pragma ignored.");
     return false;
 }
 
 /** Handle a C++-style comment--eat everything up until the end of the line.
  */
 static void
-lCppComment(SourcePos *pos) {
+lCppComment(yyscan_t scanner, SourcePos *pos) {
     char c;
     do {
-        c = yyinput();
+        c = yyinput(scanner);
     } while (c != 0 && c != '\n');
     if (c == '\n') {
         pos->last_line++;
@@ -913,20 +914,24 @@ lCppComment(SourcePos *pos) {
     left behind by the preprocessor indicating the source file/line
     that our current position corresponds to.
  */
-static void lHandleCppHash(SourcePos *pos) {
+static void lHandleCppHash(FlexLexerData* lexerData, char *tokenText) {
+
+    SourcePos *pos = &lexerData->yylloc;
+
     char *ptr, *src;
 
     // Advance past the opening stuff on the line.
-    Assert(yytext[0] == '#');
-    if (yytext[1] == ' ')
+    Assert(tokenText[0] == '#');
+
+    if (tokenText[1] == ' ')
         // On Linux/OSX, the preprocessor gives us lines like
         // # 1234 "foo.c"
-        ptr = yytext + 2;
+        ptr = &tokenText[2];
     else {
         // On windows, cl.exe's preprocessor gives us lines of the form:
         // #line 1234 "foo.c"
-        Assert(!strncmp(yytext+1, "line ", 5));
-        ptr = yytext + 6;
+        Assert(!strncmp(&tokenText[1], "line ", 5));
+        ptr = &tokenText[6];
     }
 
     // Now we can set the line number based on the integer in the string
@@ -946,7 +951,7 @@ static void lHandleCppHash(SourcePos *pos) {
         ++src;
     }
     pos->name = strdup(filename.c_str());
-    RegisterDependency(filename);
+    lexerData->RegisterDependency(filename);
 }
 
 
@@ -957,7 +962,7 @@ static void lHandleCppHash(SourcePos *pos) {
     decoded character is returned in *pChar.
 */
 static char *
-lEscapeChar(char *str, char *pChar, SourcePos *pos)
+lEscapeChar(FlexLexerData *lexerData, char *str, char *pChar, SourcePos *pos)
 {
     if (*str != '\\') {
         *pChar = *str;
@@ -989,7 +994,7 @@ lEscapeChar(char *str, char *pChar, SourcePos *pos)
             str = tail - 1;
             break;
         default:
-            Error(*pos, "Bad character escape sequence: '%s'.", str);
+            Error(lexerData, "Bad character escape sequence: '%s'.", str);
             break;
         }
     }
@@ -1003,17 +1008,17 @@ lEscapeChar(char *str, char *pChar, SourcePos *pos)
     characters until we come to the closing quote.
 */
 static void
-lStringConst(YYSTYPE *yylval, SourcePos *pos)
+lStringConst(FlexLexerData* lexerData, YYSTYPE *yylval, SourcePos *pos, char *tokenText)
 {
     char *p;
     std::string str;
-    p = strchr(yytext, '"') + 1;
+    p = strchr(tokenText, '"') + 1;
     if (p == NULL)
        return;
 
     while (*p != '\"') {
        char cval = '\0';
-       p = lEscapeChar(p, &cval, pos);
+       p = lEscapeChar(lexerData, p, &cval, pos);
        str.push_back(cval);
     }
     yylval->stringVal = new std::string(str);
