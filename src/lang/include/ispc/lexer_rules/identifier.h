@@ -18,15 +18,15 @@ template <typename Char> class IdentifierLexerRule final : public LexerRule<Iden
   public:
     using RuleResult = LexerRuleResult;
 
-    RuleResult Lex(const Char *source, std::size_t length) const {
+    template <typename Context> RuleResult Lex(const LexerRuleProxy<Char> &ruleProxy, const Context &) const {
 
-        if (!length || !IsNonDigit(source[0]))
+        if (!IsNonDigit(ruleProxy.Peek(0)))
             return {};
 
         std::size_t match = 1;
 
-        while (match < length) {
-            auto c = source[match];
+        while (!ruleProxy.IsOutOfBounds(match)) {
+            auto c = ruleProxy.Peek(match);
             if (IsDigit(c) || IsNonDigit(c))
                 match++;
             else
@@ -36,11 +36,10 @@ template <typename Char> class IdentifierLexerRule final : public LexerRule<Iden
         return {TokenKind::Identifier, match};
     }
 
-    TokenData<Char> ExecuteAction(const Char *source, const RuleResult &result) {
+    template <typename Context>
+    TokenData<Char> ExecuteAction(const LexerRuleProxy<Char> &ruleProxy, const RuleResult &result, const Context &) {
 
-        string_type str(source, result.matchLength);
-
-        auto it = knownIdentifiers.emplace(std::move(str)).first;
+        auto it = knownIdentifiers.emplace(ruleProxy.CopyString(result.matchLength)).first;
 
         return TokenData<Char>::MakeString(it->c_str());
     }

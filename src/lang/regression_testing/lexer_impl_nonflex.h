@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 class LexerImpl;
 
-LexerImpl* MakeNonFlexLexer();
+LexerImpl *MakeNonFlexLexer(std::size_t laneBits);

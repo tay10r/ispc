@@ -14,6 +14,8 @@ class NonFlexLexer final : public LexerImpl {
     std::vector<ispc::Token<char>> tokens;
 
   public:
+    NonFlexLexer(std::size_t laneBits) { lexer.GetOptions().laneBits = laneBits; }
+
     void ScanTokens() override {
         while (!this->lexer.AtEnd()) {
             auto result = this->lexer.Lex();
@@ -38,6 +40,8 @@ class NonFlexLexer final : public LexerImpl {
             return "eof";
         case ispc::TokenKind::Newline:
             return "newline";
+        case ispc::TokenKind::Whitespace:
+            return "whitespace";
         case ispc::TokenKind::Identifier:
             return "identifier";
         case ispc::TokenKind::UInt8Constant:
@@ -69,9 +73,8 @@ class NonFlexLexer final : public LexerImpl {
 
         switch (tok.GetKind()) {
         case ispc::TokenKind::EndOfFile:
-            break;
+        case ispc::TokenKind::Whitespace:
         case ispc::TokenKind::Newline:
-            stream << "\\n";
             break;
         case ispc::TokenKind::Int8Constant:
         case ispc::TokenKind::Int16Constant:
@@ -102,4 +105,4 @@ class NonFlexLexer final : public LexerImpl {
 
 } // namespace
 
-LexerImpl *MakeNonFlexLexer() { return new NonFlexLexer(); }
+LexerImpl *MakeNonFlexLexer(std::size_t laneBits) { return new NonFlexLexer(laneBits); }

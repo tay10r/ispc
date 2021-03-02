@@ -20,7 +20,8 @@ enum class TokenKind {
     UInt16Constant,
     UInt32Constant,
     UInt64Constant,
-    Newline
+    Newline,
+    Whitespace
 };
 
 /** @brief A union of all types allowed of token data.

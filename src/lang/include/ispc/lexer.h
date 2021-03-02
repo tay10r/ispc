@@ -1,10 +1,13 @@
 #pragma once
 
+#include <ispc/context_free.h>
+#include <ispc/lexer_options.h>
 #include <ispc/token.h>
 
 #include <ispc/lexer_rules/identifier.h>
 #include <ispc/lexer_rules/integer.h>
 #include <ispc/lexer_rules/newline.h>
+#include <ispc/lexer_rules/whitespace.h>
 
 #include <array>
 
@@ -14,7 +17,7 @@ template <typename Char, typename FirstRule, typename... OtherRules> class Lexer
 
 /** @brief A type definition for a lexer containing the rules for ISPC. */
 template <typename Char = char>
-using ISPCLexer = Lexer<Char, IdentifierLexerRule<Char>, IntegerLexerRule, NewlineLexerRule>;
+using ISPCLexer = Lexer<Char, IdentifierLexerRule<Char>, IntegerLexerRule, NewlineLexerRule, WhitespaceLexerRule>;
 
 /** @brief The result of a lexer call.
 
@@ -22,12 +25,9 @@ using ISPCLexer = Lexer<Char, IdentifierLexerRule<Char>, IntegerLexerRule, Newli
     errors that were found while scanning it.
  */
 template <typename Char> struct LexResult final {
-
     Token<Char> token;
-
-    LexicalError error = LexicalError::None;
-
-    constexpr bool HasError() const noexcept { return error != LexicalError::None; }
+    /** Contains warnings or errors regarding the token. */
+    std::vector<Diagnostic> diagnostics;
 };
 
 template <typename Char> bool AtEnd(const ISPCLexer<Char> &lexer) { return lexer.AtEnd(); }
@@ -85,23 +85,31 @@ template <typename Char, typename FirstRule, typename... OtherRules> class Lexer
 
     bool AtEnd() const noexcept { return (this->index >= this->source.size()) || this->allRulesFailed; }
 
+    LexerOptions &GetOptions() noexcept { return options; }
+
     LexResult<Char> Lex() {
+
+        ContextFree contextFreeTag;
+
         DefaultRuleSelector defSelector{};
-        return this->Lex(defSelector);
+
+        return this->Lex(defSelector, contextFreeTag);
     }
 
-    template <typename RuleSelector> LexResult<Char> Lex(const RuleSelector &ruleSelector) {
+    template <typename RuleSelector, typename Context>
+    LexResult<Char> Lex(const RuleSelector &ruleSelector, const Context &context) {
 
         if (!filterTokens)
-            return LexUnfiltered(ruleSelector);
+            return LexUnfiltered(ruleSelector, context);
 
         while (!AtEnd()) {
-            auto result = LexUnfiltered(ruleSelector);
-            if (result.HasError())
+            auto result = LexUnfiltered(ruleSelector, context);
+            if (result.diagnostics.size() > 0)
                 return result;
 
             switch (result.token.GetKind()) {
             case TokenKind::Newline:
+            case TokenKind::Whitespace:
                 continue;
             case TokenKind::Identifier:
             case TokenKind::Int8Constant:
@@ -128,15 +136,16 @@ template <typename Char, typename FirstRule, typename... OtherRules> class Lexer
     }
 
   private:
-    template <typename RuleSelector> LexResult<Char> LexUnfiltered(const RuleSelector &ruleSelector) {
+    LexerRuleProxy<Char> MakeRuleProxy() const noexcept {
+        return LexerRuleProxy<Char>(source.data(), source.size(), index, options);
+    }
 
-        const char *ruleInputText = source.data() + index;
-
-        std::size_t ruleInputLength = source.size() - index;
+    template <typename RuleSelector, typename Context>
+    LexResult<Char> LexUnfiltered(const RuleSelector &ruleSelector, const Context &context) {
 
         RuleResultArray ruleResults;
 
-        this->grammar.Lex(ruleResults.data(), ruleInputText, ruleInputLength);
+        this->grammar.Lex(ruleResults.data(), MakeRuleProxy(), context);
 
         if (None(ruleResults)) {
             this->allRulesFailed = true;
@@ -150,7 +159,7 @@ template <typename Char, typename FirstRule, typename... OtherRules> class Lexer
             return {};
         }
 
-        return this->Produce(ruleIndex, ruleResults[ruleIndex]);
+        return this->Produce(ruleIndex, ruleResults[ruleIndex], context);
     }
 
     static bool None(const RuleResultArray &ruleResults) {
@@ -178,11 +187,12 @@ template <typename Char, typename FirstRule, typename... OtherRules> class Lexer
         this->index += charCount;
     }
 
-    LexResult<Char> Produce(std::size_t ruleIndex, const RuleResult &ruleResult) {
+    template <typename Context>
+    LexResult<Char> Produce(std::size_t ruleIndex, const RuleResult &ruleResult, const Context &context) {
 
         Token<Char> token;
 
-        token.data = grammar.ExecuteRuleAction(ruleIndex, source.data() + index, ruleResult);
+        token.data = grammar.ExecuteRuleAction(ruleIndex, MakeRuleProxy(), ruleResult, context);
 
         token.kind = ruleResult.tokenKind;
 
@@ -194,7 +204,14 @@ template <typename Char, typename FirstRule, typename... OtherRules> class Lexer
         token.sourceRange.last_line = int(this->line);
         token.sourceRange.last_column = int(this->column);
 
-        return {token, ruleResult.error};
+        LexResult<Char> lexResult;
+
+        lexResult.token = token;
+
+        for (const auto &err : ruleResult.errors)
+            lexResult.diagnostics.emplace_back(ToDiagnostic(err));
+
+        return lexResult;
     }
 
     struct DefaultRuleSelector final {
@@ -222,33 +239,52 @@ template <typename Char, typename FirstRule, typename... OtherRules> class Lexer
 
         Grammar<OtherR...> grammar;
 
-        void Lex(RuleResult *result, const Char *source, std::size_t length) {
+        template <typename Context>
+        void Lex(RuleResult *result, const LexerRuleProxy<Char> &ruleProxy, const Context &context) {
 
-            result[0] = rule(source, length);
+            result[0] = rule(ruleProxy, context);
 
-            grammar.Lex(result + 1, source, length);
+            grammar.Lex(result + 1, ruleProxy, context);
         }
 
-        TokenData<Char> ExecuteRuleAction(std::size_t index, const Char *s, const RuleResult &result) {
-            if (index == 0)
-                return rule(s, result);
-            else
-                return grammar.ExecuteRuleAction(index - 1, s, result);
+        template <typename Context>
+        TokenData<Char> ExecuteRuleAction(std::size_t index, const LexerRuleProxy<Char> &ruleProxy,
+                                          const RuleResult &result, const Context &context) {
+            if (index == 0) {
+                return rule(ruleProxy, result, context);
+            } else {
+                return grammar.ExecuteRuleAction(index - 1, ruleProxy, result, context);
+            }
         }
     };
 
     template <typename LastR> struct Grammar<LastR> final {
         LastR lastRule;
 
-        void Lex(RuleResult *result, const Char *source, std::size_t length) { result[0] = lastRule(source, length); }
+        template <typename Context>
+        void Lex(RuleResult *result, const LexerRuleProxy<Char> &ruleProxy, const Context &context) {
 
-        TokenData<Char> ExecuteRuleAction(std::size_t index, const Char *s, const RuleResult &result) {
-            if (index == 0)
-                return lastRule(s, result);
-            else
+            result[0] = lastRule(ruleProxy, context);
+        }
+
+        template <typename Context>
+        TokenData<Char> ExecuteRuleAction(std::size_t index, const LexerRuleProxy<Char> &ruleProxy,
+                                          const RuleResult &result, const Context &context) {
+            if (index == 0) {
+                return lastRule(ruleProxy, result, context);
+            } else {
                 return TokenData<Char>::Make();
+            }
         }
     };
+
+    Diagnostic ToDiagnostic(const LexicalError &lexicalError) {
+        Diagnostic diag;
+        diag.id = lexicalError.diagnosticID;
+        return diag;
+    }
+
+    LexerOptions options;
 
     /** If true, all comments, whitespace, and newlines are skipped. */
     bool filterTokens = true;

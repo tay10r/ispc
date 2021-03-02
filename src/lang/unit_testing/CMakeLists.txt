@@ -15,6 +15,8 @@ endif(TARGET gtest)
 add_executable(${PROJECT_NAME}_unit_tests
   lexer_tests.cpp)
 
+target_compile_options(${PROJECT_NAME}_unit_tests PRIVATE -Wall -Wextra -Werror -Wfatal-errors)
+
 set_target_properties(${PROJECT_NAME}_unit_tests
   PROPERTIES
     OUTPUT_NAME run_unit_tests

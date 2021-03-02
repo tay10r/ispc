@@ -240,9 +240,10 @@ class FlexScanner final : public LexerImpl {
     std::vector<FlexToken> tokens;
 
   public:
-    FlexScanner() {
+    FlexScanner(std::size_t laneBits) {
         ParserInit();
         extraData.symbolTable.reset(new FakeSymbolTable());
+        extraData.dataTypeWidth = laneBits;
         yylex_init_extra(&extraData, &scanner);
     }
 
@@ -329,4 +330,4 @@ class FlexScanner final : public LexerImpl {
 
 } // namespace
 
-LexerImpl *MakeFlexLexer() { return new FlexScanner(); }
+LexerImpl *MakeFlexLexer(std::size_t laneBits) { return new FlexScanner(laneBits); }

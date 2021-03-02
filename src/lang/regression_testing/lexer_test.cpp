@@ -71,11 +71,15 @@ struct LexerResult final {
 
 LexerResult RunLexer(const std::string &source, std::unique_ptr<LexerImpl> lexer);
 
+bool RunTest(const std::string &input, std::size_t bits = 32);
+
 void PrintResults(const std::string &expected, const std::string &actual);
 
 } // namespace
 
 int main(int argc, char **argv) {
+
+    bool testAllLaneWidths = false;
 
     bool randomInput = false;
 
@@ -91,6 +95,8 @@ int main(int argc, char **argv) {
         } else if (argStream.MatchOpt("random-seed")) {
             if (!argStream.MatchValue(randomSeed, "random-seed"))
                 return EXIT_FAILURE;
+        } else if (argStream.MatchOpt("test-all-lane-widths")) {
+            testAllLaneWidths = true;
         } else if (argStream.AtNonOpt()) {
             inputPaths.emplace_back(argStream.PopArg());
         } else {
@@ -128,23 +134,36 @@ int main(int argc, char **argv) {
             input[oldLength + i] = charDist(rng);
     }
 
-    auto prevResult = RunLexer(input, LexerImpl::MakeFlexLexer());
-    auto nextResult = RunLexer(input, LexerImpl::MakeNonFlexLexer());
+    if (testAllLaneWidths) {
+        for (std::size_t bits = 8; bits < 128; bits *= 2) {
+            if (!RunTest(input, bits))
+                return EXIT_FAILURE;
+        }
+        return EXIT_SUCCESS;
+    } else {
+        return RunTest(input) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+}
+
+namespace {
+
+bool RunTest(const std::string &input, std::size_t laneBits) {
+
+    auto prevResult = RunLexer(input, LexerImpl::MakeFlexLexer(laneBits));
+    auto nextResult = RunLexer(input, LexerImpl::MakeNonFlexLexer(laneBits));
 
     if (nextResult.printedTokens != prevResult.printedTokens) {
-        std::cerr << "Test failed." << std::endl;
+        std::cerr << "Test failed (lane bits : " << laneBits << ")." << std::endl;
         PrintResults(prevResult.printedTokens, nextResult.printedTokens);
-        return EXIT_FAILURE;
+        return false;
     }
 
     float speedupFactor = nextResult.duration / prevResult.duration;
 
     std::cout << "Test passed (speed up factor: " << speedupFactor << ")" << std::endl;
 
-    return EXIT_SUCCESS;
+    return true;
 }
-
-namespace {
 
 LexerResult RunLexer(const std::string &source, std::unique_ptr<LexerImpl> lexer) {
 

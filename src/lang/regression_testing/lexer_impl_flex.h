@@ -78,7 +78,7 @@ template <typename... Args> void Error(FlexLexerData *lexerData, const Args &...
 
 class LexerImpl;
 
-LexerImpl *MakeFlexLexer();
+LexerImpl *MakeFlexLexer(std::size_t laneBits);
 
 enum TokenKind {
     TOKEN_ASSERT,

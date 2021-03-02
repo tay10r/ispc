@@ -3,12 +3,10 @@
 #include "lexer_impl_flex.h"
 #include "lexer_impl_nonflex.h"
 
-std::unique_ptr<LexerImpl>
-LexerImpl::MakeNonFlexLexer() {
-    return std::unique_ptr<LexerImpl>(::MakeNonFlexLexer());
+std::unique_ptr<LexerImpl> LexerImpl::MakeNonFlexLexer(std::size_t laneBits) {
+    return std::unique_ptr<LexerImpl>(::MakeNonFlexLexer(laneBits));
 }
 
-std::unique_ptr<LexerImpl>
-LexerImpl::MakeFlexLexer() {
-    return std::unique_ptr<LexerImpl>(::MakeFlexLexer());
+std::unique_ptr<LexerImpl> LexerImpl::MakeFlexLexer(std::size_t laneBits) {
+    return std::unique_ptr<LexerImpl>(::MakeFlexLexer(laneBits));
 }
